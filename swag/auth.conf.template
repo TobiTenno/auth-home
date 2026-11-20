@@ -1,0 +1,40 @@
+# Copy to SWAG /config/nginx/site-confs/auth.conf after ./setup.sh
+# ADMIN_EXPOSE=@ADMIN_EXPOSE@ — IP allowlist on admin locations only.
+# Login + OIDC discovery stay public.
+# Upstreams use auth_* container names on Docker network "auth".
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name @AUTH_HOST@;
+
+    include /config/nginx/ssl.conf;
+    include /config/nginx/proxy.conf;
+    include /config/nginx/resolver.conf;
+
+    # Optional admin UI (compose --profile admin)
+    location ^~ /auth-admin/ {
+@ADMIN_ALLOW@
+        set $upstream_app auth_authelia_admin;
+        set $upstream_port 8080;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+
+    # LLDAP web UI (optional; keep locked). Comment out if unused.
+    location ^~ /lldap/ {
+@ADMIN_ALLOW@
+        set $upstream_app auth_lldap;
+        set $upstream_port 17170;
+        set $upstream_proto http;
+        rewrite ^/lldap/?(.*) /$1 break;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+
+    location / {
+        set $upstream_app auth_authelia;
+        set $upstream_port 9091;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+}

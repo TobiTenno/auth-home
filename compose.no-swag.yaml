@@ -1,0 +1,23 @@
+# Generated / enabled by ./setup.sh --no-swag
+# Publishes host ports when SWAG is not proxying. Merge with:
+#   docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
+#
+# Override host binds via env if needed (defaults avoid common clashes):
+#   AUTH_HOST_PORT_LLDAP_HTTP=17170
+#   AUTH_HOST_PORT_LLDAP_LDAP=3890
+#   AUTH_HOST_PORT_AUTHELIA=9091
+#   AUTH_HOST_PORT_ADMIN=8080
+
+services:
+  auth_lldap:
+    ports:
+      - "${AUTH_HOST_PORT_LLDAP_HTTP:-17170}:17170"
+      - "${AUTH_HOST_PORT_LLDAP_LDAP:-3890}:3890"
+
+  auth_authelia:
+    ports:
+      - "${AUTH_HOST_PORT_AUTHELIA:-9091}:9091"
+
+  auth_authelia_admin:
+    ports:
+      - "${AUTH_HOST_PORT_ADMIN:-8080}:8080"

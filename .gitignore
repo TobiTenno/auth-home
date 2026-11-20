@@ -1,0 +1,13 @@
+config/common.env
+config/lldap.env
+config/authelia.env
+config/authelia.secrets.env
+config/.authelia-admin.env
+config/auth.env
+config/authelia/configuration.yml
+config/authelia/oidc.pem
+config/secrets/
+swag/auth.conf
+.compose-file
+.no-swag
+*.tmp

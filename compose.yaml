@@ -1,0 +1,63 @@
+name: auth-home
+
+# Separate from tak-home. Services/containers use auth_ prefix (like tak_*).
+# Joins Docker networks "auth" (own) and "tak" (shared with SWAG / tak-home).
+#
+#   ./setup.sh example.com -f ../docker-compose.yml
+#   docker compose --profile auth up -d
+#   docker compose --profile auth --profile admin up -d   # + auth_authelia_admin
+#
+# No host ports by default (SWAG proxies). For direct publish:
+#   ./setup.sh example.com --no-swag
+#   docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
+
+x-auth: &auth
+  profiles: [auth]
+  restart: unless-stopped
+  networks: [auth, tak]
+
+services:
+  auth_lldap:
+    <<: *auth
+    image: lldap/lldap:stable
+    container_name: auth_lldap
+    env_file:
+      - ./config/common.env
+      - ./config/lldap.env
+    volumes:
+      - lldap_data:/data
+
+  auth_authelia:
+    <<: *auth
+    image: authelia/authelia:latest
+    container_name: auth_authelia
+    depends_on: [auth_lldap]
+    env_file:
+      - ./config/common.env
+      - ./config/authelia.env
+    volumes:
+      - ./config/authelia:/config:ro
+      - authelia_data:/data
+
+  # Optional UI: docker compose --profile auth --profile admin up -d
+  auth_authelia_admin:
+    <<: *auth
+    # Override anchor: only with --profile admin (also pass --profile auth for deps)
+    profiles: [admin]
+    image: ghcr.io/asalimonov/authelia-admin:latest
+    container_name: auth_authelia_admin
+    depends_on: [auth_authelia, auth_lldap]
+    env_file:
+      - ./config/common.env
+      - ./config/.authelia-admin.env
+
+volumes:
+  lldap_data:
+  authelia_data:
+
+networks:
+  auth:
+    name: auth
+  tak:
+    name: ${AUTH_NETWORK:-tak}
+    external: true
