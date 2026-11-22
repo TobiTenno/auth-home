@@ -11,11 +11,14 @@ Containers use the `auth_` prefix (like `tak_*`). Not part of `tak-home`.
 ./setup.sh example.com -f ../docker-compose.yml --admin-expose tailscale
 
 # Preferred on a shared root compose: name services (does not start unprofiled siblings)
-docker compose up -d auth_lldap auth_authelia
-docker compose up -d auth_lldap auth_authelia auth_authelia_admin
+docker compose up -d auth_lldap
+./scripts/migrate-users.sh --bind-only   # create Authelia LDAP bind user
+docker compose up -d auth_authelia
+docker compose up -d auth_authelia_admin  # optional
 
 # Profile form (fine in a standalone auth-home project; on a shared root compose
-# --profile auth also starts every service that has no profile)
+# --profile auth also starts every service that has no profile). Still run --bind-only
+# after LLDAP is up, or Authelia exits with LDAP Invalid Credentials.
 docker compose --profile auth up -d
 docker compose --profile auth --profile admin up -d
 
@@ -37,9 +40,21 @@ Always run setup from the git/authoring clone with `-f`; do not expect templates
 
 ```sh
 ./setup.sh example.com --no-swag
-docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia
-docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
+docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap
+./scripts/migrate-users.sh --bind-only
+docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_authelia
+docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d   # still need --bind-only first
 ```
+
+## Authelia LDAP bind user
+
+Authelia binds to LLDAP as `uid=authelia,…` using `LLDAP_AUTHELIA_PASSWORD`. Compose does **not** create that user. After `auth_lldap` is up:
+
+```sh
+./scripts/migrate-users.sh --bind-only
+```
+
+Then start `auth_authelia`. Full user migrate also ensures the bind user. Symptom if skipped: LLDAP `Authentication error for user "authelia"` and Authelia `LDAP Result Code 49 "Invalid Credentials"`.
 
 Default host ports: `17170`/`3890` (LLDAP), `9091` (Authelia), `8080` (admin). Override with `AUTH_HOST_PORT_*`.
 

@@ -5,16 +5,21 @@ name: auth-home
 #
 #   ./setup.sh example.com -f ../docker-compose.yml
 # By name (preferred on shared root compose):
-#   docker compose up -d auth_lldap auth_authelia
-#   docker compose up -d auth_lldap auth_authelia auth_authelia_admin
+#   docker compose up -d auth_lldap
+#   ./scripts/migrate-users.sh --bind-only   # required before Authelia
+#   docker compose up -d auth_authelia
+#   docker compose up -d auth_authelia_admin
 # By profile (also starts unprofiled root services when included there):
 #   docker compose --profile auth up -d
+#   ./scripts/migrate-users.sh --bind-only
+#   docker compose up -d auth_authelia
 #   docker compose --profile auth --profile admin up -d
 #
 # No host ports by default (SWAG proxies). For direct publish:
 #   ./setup.sh example.com --no-swag
-#   docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia
-#   docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
+#   docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap
+#   ./scripts/migrate-users.sh --bind-only
+#   docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_authelia
 
 x-auth: &auth
   profiles: [auth]
@@ -38,11 +43,16 @@ services:
     image: authelia/authelia:latest
     container_name: auth_authelia
     depends_on: [auth_lldap]
+    # Share SQLite with auth_authelia_admin (uid 1001)
+    environment:
+      PUID: "1001"
+      PGID: "1001"
     env_file:
       - ./config/common.env
       - ./config/authelia.env
     volumes:
       # File mounts (not the whole dir): entrypoint chown fails on :ro directory binds
+      # Harmless: entrypoint still logs "chown: ... Read-only file system" once
       - ./config/authelia/configuration.yml:/config/configuration.yml:ro
       - ./data/authelia:/data
 
@@ -57,6 +67,9 @@ services:
     env_file:
       - ./config/common.env
       - ./config/authelia-admin.env
+    volumes:
+      - ./config/authelia/configuration.yml:/config/configuration.yml:ro
+      - ./data/authelia:/data
 
 networks:
   auth:

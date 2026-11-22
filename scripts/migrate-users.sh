@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Seed LLDAP users from tak-home (USERS + optional USER_PASS_*).
 #
+#   ./scripts/migrate-users.sh --bind-only
 #   ./scripts/migrate-users.sh --tak-home ../tak-home --dry-run
 #   ./scripts/migrate-users.sh --tak-home ../tak-home --migrate-plaintext-pass
 #   ./scripts/migrate-users.sh --tak-home ../tak-home --email-domain example.com
@@ -23,13 +24,16 @@ migrate_plaintext=0
 dry_run=0
 no_passwords=0
 ensure_groups=1
+bind_only=0
 lldap_url="${LLDAP_URL:-http://127.0.0.1:17170}"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/migrate-users.sh --tak-home PATH [options]
+Usage: ./scripts/migrate-users.sh --bind-only
+       ./scripts/migrate-users.sh --tak-home PATH [options]
        ./scripts/migrate-users.sh --users-file PATH [options]
 
+  --bind-only                  Create Authelia LDAP bind user + default groups only
   --tak-home PATH              tak-home deploy/src with config/takserver.env + secrets.env
   --users-file PATH            TSV: username<TAB>email[<TAB>password] (password optional)
   --email-domain DOMAIN        If no email map: user -> user@DOMAIN
@@ -39,7 +43,8 @@ Usage: ./scripts/migrate-users.sh --tak-home PATH [options]
   --lldap-url URL              Default http://127.0.0.1:17170 (or docker exec path)
   --skip-groups                Do not ensure default groups
 
-Requires config/auth.env (from ./setup.sh). Talks to LLDAP GraphQL as admin.
+Requires config/*.env (from ./setup.sh). Talks to LLDAP GraphQL as admin.
+Start auth_lldap first; run --bind-only before starting auth_authelia.
 EOF
 }
 
@@ -50,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --email-domain) email_domain=$2; shift 2 ;;
     --migrate-plaintext-pass) migrate_plaintext=1; shift ;;
     --no-passwords) no_passwords=1; shift ;;
+    --bind-only) bind_only=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --lldap-url) lldap_url=$2; shift 2 ;;
     --skip-groups) ensure_groups=0; shift ;;
@@ -58,7 +64,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n $tak_home || -n $users_file ]] || { usage; exit 1; }
+[[ $bind_only -eq 1 || -n $tak_home || -n $users_file ]] || { usage; exit 1; }
 [[ -f config/common.env && -f config/lldap.env ]] || {
   echo "Missing config/*.env — run ./setup.sh first" >&2
   exit 1
@@ -183,41 +189,52 @@ set_password() {
 # Collect users: username email password(optional)
 declare -a ROWS=()
 
-if [[ -n $users_file ]]; then
-  while IFS=$'\t' read -r u e p || [[ -n ${u:-} ]]; do
-    [[ -z ${u:-} || $u == \#* ]] && continue
-    ROWS+=("$u	${e:-}	${p:-}")
-  done < "$users_file"
-fi
-
-if [[ -n $tak_home ]]; then
-  tak_home=$(cd "$tak_home" && pwd)
-  ts=$tak_home/config/takserver.env
-  sec=$tak_home/config/secrets.env
-  [[ -f $ts ]] || { echo "Missing $ts" >&2; exit 1; }
-  # shellcheck disable=SC1090
-  set -a; source "$ts"; set +a
-  if [[ -f $sec ]]; then
-    # shellcheck disable=SC1090
-    set -a; source "$sec"; set +a
+if [[ $bind_only -eq 0 ]]; then
+  if [[ -n $users_file ]]; then
+    while IFS=$'\t' read -r u e p || [[ -n ${u:-} ]]; do
+      [[ -z ${u:-} || $u == \#* ]] && continue
+      ROWS+=("$u	${e:-}	${p:-}")
+    done < "$users_file"
   fi
-  email_domain=${email_domain:-${DOMAIN:-}}
-  for user in ${USERS:-}; do
-    key="USER_PASS_$(echo "$user" | tr '[:lower:]-' '[:upper:]_')"
-    pass=${!key:-}
-    if [[ -n $email_domain ]]; then
-      email="${user}@${email_domain}"
-    else
-      email=$user
+
+  if [[ -n $tak_home ]]; then
+    tak_home=$(cd "$tak_home" && pwd)
+    ts=$tak_home/config/takserver.env
+    sec=$tak_home/config/secrets.env
+    [[ -f $ts ]] || { echo "Missing $ts" >&2; exit 1; }
+    # shellcheck disable=SC1090
+    set -a; source "$ts"; set +a
+    if [[ -f $sec ]]; then
+      # shellcheck disable=SC1090
+      set -a; source "$sec"; set +a
     fi
-    ROWS+=("$user	$email	$pass")
-  done
+    email_domain=${email_domain:-${DOMAIN:-}}
+    for user in ${USERS:-}; do
+      key="USER_PASS_$(echo "$user" | tr '[:lower:]-' '[:upper:]_')"
+      pass=${!key:-}
+      if [[ -n $email_domain ]]; then
+        email="${user}@${email_domain}"
+      else
+        email=$user
+      fi
+      ROWS+=("$user	$email	$pass")
+    done
+  fi
+
+  [[ ${#ROWS[@]} -gt 0 ]] || { echo "No users found" >&2; exit 1; }
 fi
 
-[[ ${#ROWS[@]} -gt 0 ]] || { echo "No users found" >&2; exit 1; }
+[[ -n ${LLDAP_AUTHELIA_PASSWORD:-} ]] || {
+  echo "Missing LLDAP_AUTHELIA_PASSWORD (config/common.env or authelia.secrets.env)" >&2
+  exit 1
+}
 
-echo "Users: ${#ROWS[@]}"
-echo "Plaintext migrate: $([[ $migrate_plaintext -eq 1 ]] && echo yes || echo no)"
+if [[ $bind_only -eq 1 ]]; then
+  echo "Mode: bind-only (Authelia LDAP user + groups)"
+else
+  echo "Users: ${#ROWS[@]}"
+  echo "Plaintext migrate: $([[ $migrate_plaintext -eq 1 ]] && echo yes || echo no)"
+fi
 echo "Dry-run: $([[ $dry_run -eq 1 ]] && echo yes || echo no)"
 
 if [[ $dry_run -eq 0 ]]; then
@@ -233,39 +250,41 @@ fi
 : > "$root/config/secrets/pending-passwords.tsv" 2>/dev/null || true
 umask 077
 
-for row in "${ROWS[@]}"; do
-  IFS=$'\t' read -r user email pass <<<"$row"
-  [[ -n $email ]] || email=$user
-  # LLDAP id: prefer email local-part sanitized, or username
-  id=$(echo "$user" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-' | sed 's/^-//;s/-$//')
-  create_user "$id" "$email"
-  add_to_group "$id" "cloudtak_users"
-  add_to_group "$id" "authelia_users"
+if [[ $bind_only -eq 0 ]]; then
+  for row in "${ROWS[@]}"; do
+    IFS=$'\t' read -r user email pass <<<"$row"
+    [[ -n $email ]] || email=$user
+    # LLDAP id: prefer email local-part sanitized, or username
+    id=$(echo "$user" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-' | sed 's/^-//;s/-$//')
+    create_user "$id" "$email"
+    add_to_group "$id" "cloudtak_users"
+    add_to_group "$id" "authelia_users"
 
-  if [[ $no_passwords -eq 1 ]]; then
-    echo "user:      $id <$email> (no password)"
-    continue
-  fi
+    if [[ $no_passwords -eq 1 ]]; then
+      echo "user:      $id <$email> (no password)"
+      continue
+    fi
 
-  if [[ $migrate_plaintext -eq 1 && -n ${pass:-} ]]; then
-    set_password "$id" "$pass"
-    echo "user:      $id <$email> password=seeded"
-  elif [[ $migrate_plaintext -eq 1 && -z ${pass:-} ]]; then
-    tmp="Temp!$(openssl rand -hex 6)"
-    set_password "$id" "$tmp"
-    echo "user:      $id <$email> password=TEMP (no USER_PASS_*): $tmp"
-  else
-    tmp="Temp!$(openssl rand -hex 6)"
-    set_password "$id" "$tmp"
-    echo "user:      $id <$email> password=TEMP: $tmp"
-  fi
-done
+    if [[ $migrate_plaintext -eq 1 && -n ${pass:-} ]]; then
+      set_password "$id" "$pass"
+      echo "user:      $id <$email> password=seeded"
+    elif [[ $migrate_plaintext -eq 1 && -z ${pass:-} ]]; then
+      tmp="Temp!$(openssl rand -hex 6)"
+      set_password "$id" "$tmp"
+      echo "user:      $id <$email> password=TEMP (no USER_PASS_*): $tmp"
+    else
+      tmp="Temp!$(openssl rand -hex 6)"
+      set_password "$id" "$tmp"
+      echo "user:      $id <$email> password=TEMP: $tmp"
+    fi
+  done
+fi
 
-# Ensure Authelia bind user exists
+# Ensure Authelia bind user exists (required before auth_authelia can start)
 if [[ $dry_run -eq 0 ]]; then
   create_user "authelia" "authelia@${DOMAIN:-localhost}"
   set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"
-  echo "bind:      authelia (LLDAP_AUTHELIA_PASSWORD from auth.env)"
+  echo "bind:      authelia (LLDAP_AUTHELIA_PASSWORD)"
 fi
 
 echo "Done."
