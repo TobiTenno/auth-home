@@ -164,14 +164,35 @@ login() {
   fi
 }
 
-json_escape() {
-  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()[:-1] if False else sys.argv[1]))' "$1"
+gql_ok() {
+  # stdin: graphql response; exit 0 if data present and no errors
+  python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+  data = json.loads(raw)
+except Exception as e:
+  sys.stderr.write(f"invalid graphql json: {e}: {raw[:200]}\n")
+  sys.exit(1)
+errs = data.get("errors") or []
+if errs:
+  sys.stderr.write("graphql errors: " + json.dumps(errs) + "\n")
+  sys.exit(1)
+if data.get("data") is None:
+  sys.stderr.write(f"graphql empty data: {raw[:200]}\n")
+  sys.exit(1)
+'
 }
 
 ensure_group() {
-  local g=$1
-  local q
-  q=$(printf '{"query":"mutation { createGroup(name: %s) { id displayName } }"}' "$(json_escape "$g")")
+  local g=$1 q
+  q=$(NAME="$g" python3 -c '
+import json, os
+print(json.dumps({
+  "query": "mutation($name: String!) { createGroup(name: $name) { id displayName } }",
+  "variables": {"name": os.environ["NAME"]},
+}))
+')
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY group: $g"
     return 0
@@ -180,17 +201,33 @@ ensure_group() {
 }
 
 create_user() {
-  local user=$1 email=$2
-  local q
-  q=$(printf '{"query":"mutation { createUser(user: { id: %s, email: %s }) { id email } }"}' \
-    "$(json_escape "$user")" "$(json_escape "$email")")
+  local user=$1 email=$2 q resp
+  q=$(USER_ID="$user" EMAIL="$email" python3 -c '
+import json, os
+print(json.dumps({
+  "query": "mutation($user: CreateUserInput!) { createUser(user: $user) { id email } }",
+  "variables": {"user": {"id": os.environ["USER_ID"], "email": os.environ["EMAIL"]}},
+}))
+')
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY user:  $user <$email>"
     return 0
   fi
-  if ! graphql "$q" >/dev/null 2>&1; then
-    echo "note: createUser $user may already exist"
+  resp=$(graphql "$q") || {
+    echo "createUser $user HTTP failed: $resp" >&2
+    return 1
+  }
+  if echo "$resp" | gql_ok; then
+    echo "user:      created $user <$email>"
+    return 0
   fi
+  # Unique / already exists → treat as ok if user query works
+  if echo "$resp" | grep -qiE 'UNIQUE|already|exists'; then
+    echo "user:      $user already present"
+    return 0
+  fi
+  echo "createUser $user failed: $resp" >&2
+  return 1
 }
 
 add_to_group() {
@@ -214,8 +251,13 @@ except Exception:
   pass
 ' <<<"$resp")
   [[ -n ${gid:-} ]] || return 0
-  q=$(printf '{"query":"mutation { addUserToGroup(userId: %s, groupId: %s) { ok } }"}' \
-    "$(json_escape "$user")" "$gid")
+  q=$(USER_ID="$user" GID="$gid" python3 -c '
+import json, os
+print(json.dumps({
+  "query": "mutation($userId: String!, $groupId: Int!) { addUserToGroup(userId: $userId, groupId: $groupId) { ok } }",
+  "variables": {"userId": os.environ["USER_ID"], "groupId": int(os.environ["GID"])},
+}))
+')
   graphql "$q" >/dev/null 2>&1 || true
 }
 
@@ -290,9 +332,14 @@ set_password() {
 }
 
 delete_user() {
-  local user=$1
-  local q
-  q=$(printf '{"query":"mutation { deleteUser(userId: %s) { ok } }"}' "$(json_escape "$user")")
+  local user=$1 q
+  q=$(USER_ID="$user" python3 -c '
+import json, os
+print(json.dumps({
+  "query": "mutation($userId: String!) { deleteUser(userId: $userId) { ok } }",
+  "variables": {"userId": os.environ["USER_ID"]},
+}))
+')
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY delete: $user"
     return 0
@@ -419,8 +466,9 @@ bind_ok=1
 if [[ $dry_run -eq 0 ]]; then
   # Fresh bind user avoids stuck OPAQUE state → register/start 400
   delete_user "authelia"
-  create_user "authelia" "authelia@${DOMAIN:-localhost}"
-  if ! set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"; then
+  if ! create_user "authelia" "authelia@${DOMAIN:-localhost}"; then
+    bind_ok=0
+  elif ! set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"; then
     bind_ok=0
   elif ! verify_bind "$LLDAP_AUTHELIA_PASSWORD"; then
     bind_ok=0
