@@ -169,21 +169,49 @@ except Exception:
 
 set_password() {
   local user=$1 pass=$2
+  local err=0 out=""
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY pass:  $user"
     return 0
   fi
-  # lldap_set_password via docker if present; else HTTP register is complex — use ldap modify through container
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx auth_lldap; then
-    if docker exec auth_lldap /app/lldap_set_password --base-url http://127.0.0.1:17170 \
-      --admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS" \
-      --username "$user" --password "$pass" 2>/dev/null; then
-      return 0
-    fi
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx auth_lldap; then
+    echo "pass:      auth_lldap not running — cannot set $user" >&2
+    echo "$user	$pass" >> "$root/config/secrets/pending-passwords.tsv"
+    return 1
   fi
-  # Fallback: write to a one-shot list for the operator
+  # Do not hide stderr — silent fail left Authelia with Invalid Credentials
+  set +e
+  out=$(docker exec auth_lldap /app/lldap_set_password --base-url http://127.0.0.1:17170 \
+    --admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS" \
+    --username "$user" --password "$pass" 2>&1)
+  err=$?
+  set -e
+  if [[ $err -eq 0 ]]; then
+    echo "pass:      $user ok"
+    return 0
+  fi
+  echo "pass:      $user FAILED: $out" >&2
   echo "$user	$pass" >> "$root/config/secrets/pending-passwords.tsv"
-  echo "pass:      $user queued in config/secrets/pending-passwords.tsv (set via LLDAP UI or lldap_set_password)"
+  return 1
+}
+
+# Confirm Authelia can authenticate as the bind user (GraphQL simple login)
+verify_bind() {
+  local pass=$1 resp
+  if [[ $dry_run -eq 1 ]]; then
+    echo "DRY verify: authelia bind"
+    return 0
+  fi
+  resp=$(docker exec -i auth_lldap wget -qO- \
+    --header="Content-Type: application/json" \
+    --post-data="{\"username\":\"authelia\",\"password\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$pass")}" \
+    http://127.0.0.1:17170/auth/simple/login 2>&1) || true
+  if python3 -c 'import json,sys; json.load(sys.stdin)["token"]' <<<"$resp" 2>/dev/null; then
+    echo "verify:    authelia bind login ok"
+    return 0
+  fi
+  echo "verify:    authelia bind login FAILED: $resp" >&2
+  return 1
 }
 
 # Collect users: username email password(optional)
@@ -281,14 +309,24 @@ if [[ $bind_only -eq 0 ]]; then
 fi
 
 # Ensure Authelia bind user exists (required before auth_authelia can start)
+bind_ok=1
 if [[ $dry_run -eq 0 ]]; then
   create_user "authelia" "authelia@${DOMAIN:-localhost}"
-  set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"
-  echo "bind:      authelia (LLDAP_AUTHELIA_PASSWORD)"
+  if ! set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"; then
+    bind_ok=0
+  elif ! verify_bind "$LLDAP_AUTHELIA_PASSWORD"; then
+    bind_ok=0
+  else
+    echo "bind:      authelia ready (must match configuration.yml ldap.password)"
+  fi
 fi
 
 echo "Done."
 if [[ -s $root/config/secrets/pending-passwords.tsv ]]; then
   echo "Some passwords queued in config/secrets/pending-passwords.tsv"
+fi
+if [[ $bind_ok -eq 0 ]]; then
+  echo "FATAL: Authelia bind user password not set — auth_authelia will exit with LDAP 49" >&2
+  exit 1
 fi
 exit 0

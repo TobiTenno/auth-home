@@ -93,6 +93,14 @@ rand() { openssl rand -hex "${1:-16}"; }
 rand_pass() { echo "Auth!$(openssl rand -hex 8)"; }
 
 mkdir -p config/authelia config/secrets swag data/lldap data/authelia
+# Authelia runs as PUID 1001 (compose); admin UI shares the same SQLite tree
+if chown -R 1001:1001 data/authelia 2>/dev/null; then
+  :
+elif command -v sudo >/dev/null 2>&1 && sudo chown -R 1001:1001 data/authelia 2>/dev/null; then
+  echo "Data:       chown data/authelia → 1001:1001 (sudo)"
+else
+  echo "Data:       could not chown data/authelia to 1001:1001 — run: sudo chown -R 1001:1001 data/authelia" >&2
+fi
 
 # Preserve secrets across re-runs
 load_env() {

@@ -43,7 +43,8 @@ services:
     image: authelia/authelia:latest
     container_name: auth_authelia
     depends_on: [auth_lldap]
-    # Share SQLite with auth_authelia_admin (uid 1001)
+    # Official image su-exec's to PUID:PGID (default 0). Use 1001 so SQLite is
+    # writable by auth_authelia_admin; setup.sh chowns data/authelia accordingly.
     environment:
       PUID: "1001"
       PGID: "1001"

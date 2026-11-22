@@ -56,6 +56,19 @@ Authelia binds to LLDAP as `uid=authelia,…` using `LLDAP_AUTHELIA_PASSWORD`. C
 
 Then start `auth_authelia`. Full user migrate also ensures the bind user. Symptom if skipped: LLDAP `Authentication error for user "authelia"` and Authelia `LDAP Result Code 49 "Invalid Credentials"`.
 
+## Reset LLDAP / Authelia data
+
+Safe when nothing real is in the directory yet:
+
+```sh
+docker compose stop auth_lldap auth_authelia auth_authelia_admin
+rm -rf data/lldap/* data/authelia/*
+sudo chown -R 1001:1001 data/authelia
+docker compose up -d auth_lldap
+./scripts/migrate-users.sh --bind-only   # must print "verify: authelia bind login ok"
+docker compose up -d auth_authelia
+```
+
 Default host ports: `17170`/`3890` (LLDAP), `9091` (Authelia), `8080` (admin). Override with `AUTH_HOST_PORT_*`.
 
 ## Env files
