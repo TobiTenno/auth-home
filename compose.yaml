@@ -49,7 +49,7 @@ services:
     depends_on: [auth_authelia, auth_lldap]
     env_file:
       - ./config/common.env
-      - ./config/.authelia-admin.env
+      - ./config/authelia-admin.env
 
 volumes:
   lldap_data:

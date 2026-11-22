@@ -17,11 +17,14 @@ docker compose --profile auth --profile admin up -d   # + auth_authelia_admin
 ./scripts/migrate-users.sh --tak-home ../tak-home --email-domain example.com --migrate-plaintext-pass
 ```
 
-`-f` programmatically:
+`-f` programmatically (same idea as `tak-home`):
 
-1. `include:`s this `compose.yaml` in the root compose  
-2. Ensures top-level `networks.auth` + `networks.tak` (external)  
-3. Attaches the `swag` service (override with `--swag-service`) to **both** networks  
+1. Copies this stack next to the compose file as `auth-home/`  
+2. `include:`s `auth-home/compose.yaml` in that root compose  
+3. Ensures top-level `networks.auth` + `networks.tak` (external)  
+4. Attaches the `swag` service (override with `--swag-service`) to **both** networks  
+
+Run from the git/authoring copy; generated files land beside `-f`, not only in the clone.
 
 ## No SWAG (host ports)
 
@@ -39,7 +42,7 @@ Default host ports: `17170`/`3890` (LLDAP), `9091` (Authelia), `8080` (admin). O
 | `config/common.env` | all |
 | `config/lldap.env` | `auth_lldap` |
 | `config/authelia.env` | `auth_authelia` |
-| `config/.authelia-admin.env` | `auth_authelia_admin` (`AAD_*`) |
+| `config/authelia-admin.env` | `auth_authelia_admin` (`AAD_*`) |
 | `config/authelia.secrets.env` | setup re-runs only (YAML secrets) |
 
 Compose uses `env_file:` lists (not a single shared `auth.env`).

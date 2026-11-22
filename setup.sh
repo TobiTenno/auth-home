@@ -4,10 +4,12 @@
 #   ./setup.sh -h example.com --admin-expose tailscale
 #   ./setup.sh example.com -f ../docker-compose.yml
 #   ./setup.sh example.com --no-swag
+#
+# -f copies this stack next to the compose file (like tak-home), then
+# includes auth-home/compose.yaml and wires networks onto SWAG.
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")" && pwd)
-cd "$root"
+src=$(cd "$(dirname "$0")" && pwd)
 
 domain=""
 admin_expose=subnet
@@ -22,8 +24,8 @@ Usage: ./setup.sh <domain> [options]
        ./setup.sh -h <domain> [options]
 
   --admin-expose MODE   subnet|localhost|tailscale|public (default: subnet)
-  -f, --file PATH       Shared root compose: include this stack, add networks,
-                        attach SWAG service to auth + tak
+  -f, --file PATH       Shared root compose: copy stack beside it as auth-home/,
+                        include compose.yaml, add networks, attach SWAG
   --swag-service NAME   Service to attach networks to (default: swag)
   --no-swag             Publish host ports via compose.no-swag.yaml (no SWAG proxy)
   --force               Regenerate Authelia OIDC JWKS even if present
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     -h|--host) domain=$2; shift 2 ;;
     --admin-expose) admin_expose=$2; shift 2 ;;
     -f|--file) compose_file=$2; shift 2 ;;
+    --file=*) compose_file=${1#--file=}; [[ -n $compose_file ]] || { echo "--file needs a path" >&2; exit 1; }; shift ;;
     --swag-service) swag_service=$2; shift 2 ;;
     --no-swag) no_swag=1; shift ;;
     --force) force=1; shift ;;
@@ -50,6 +53,30 @@ case $admin_expose in
   subnet|localhost|tailscale|public) ;;
   *) echo "ADMIN_EXPOSE must be subnet|localhost|tailscale|public" >&2; exit 1 ;;
 esac
+
+if [[ -n $compose_file ]]; then
+  [[ -d $(dirname "$compose_file") ]] || {
+    echo "Compose parent dir missing: $(dirname "$compose_file")" >&2
+    exit 1
+  }
+  compose_file=$(cd "$(dirname "$compose_file")" && pwd)/$(basename "$compose_file")
+  root=$(dirname "$compose_file")/auth-home
+else
+  root=$src
+fi
+
+if [[ $root != "$src" ]]; then
+  mkdir -p "$root/config/authelia" "$root/config/secrets" "$root/swag" "$root/scripts" "$root/templates"
+  cp "$src/compose.yaml" "$src/compose.no-swag.yaml" "$src/setup.sh" "$src/README.md" "$root/"
+  cp "$src/scripts/migrate-users.sh" "$root/scripts/"
+  cp "$src/templates/"*.template "$root/templates/"
+  cp "$src/config/"*.template "$root/config/"
+  cp "$src/swag/auth.conf.template" "$root/swag/"
+  chmod +x "$root/setup.sh" "$root/scripts/migrate-users.sh"
+  echo "Deploy:     copied stack → $root"
+fi
+
+cd "$root"
 
 domain_dc=$(python3 -c "print(','.join('dc='+p for p in '${domain}'.split('.')))")
 
@@ -71,7 +98,7 @@ load_env config/common.env
 load_env config/lldap.env
 load_env config/authelia.env
 load_env config/authelia.secrets.env
-load_env config/.authelia-admin.env
+load_env config/authelia-admin.env
 # legacy single file
 load_env config/auth.env
 
@@ -117,8 +144,8 @@ chmod 600 config/lldap.env
 
 fill config/authelia.env.template config/authelia.env
 
-fill config/.authelia-admin.env.template config/.authelia-admin.env
-chmod 600 config/.authelia-admin.env
+fill config/authelia-admin.env.template config/authelia-admin.env
+chmod 600 config/authelia-admin.env
 
 # Keep LLDAP_AUTHELIA_PASSWORD available for Authelia YAML
 export LLDAP_AUTHELIA_PASSWORD
@@ -237,23 +264,34 @@ if [[ -n $compose_file ]]; then
 import os, sys, re
 
 compose_file, included, swag_svc, tak_net = sys.argv[1:5]
-base = os.path.dirname(os.path.abspath(compose_file))
-rel = os.path.relpath(os.path.abspath(included), base).replace(os.sep, "/")
+compose_file = os.path.abspath(compose_file)
+included = os.path.abspath(included)
+base = os.path.dirname(compose_file)
+rel = os.path.relpath(included, base).replace(os.sep, "/")
 text = open(compose_file).read() if os.path.exists(compose_file) else ""
+before = text
+
+def already_includes(src: str, path: str) -> bool:
+    # path: auth-home/compose.yaml  OR  - auth-home/compose.yaml  OR quoted
+    esc = re.escape(path)
+    return bool(
+        re.search(rf'(?m)^\s*-\s*path:\s*"?{esc}"?\s*$', src)
+        or re.search(rf'(?m)^\s*-\s*"?{esc}"?\s*$', src)
+    )
 
 # --- include ---
 item = f"  - path: {rel}\n"
-if f"path: {rel}" in text or f'path: "{rel}"' in text:
+if already_includes(text, rel):
     print(f"Compose:     already includes {rel}")
 elif not text.strip():
     text = f"include:\n{item}"
     print(f"Compose:     created include {rel}")
-elif text.lstrip().startswith("include:"):
+elif re.search(r"(?m)^include:\s*$", text):
     lines = text.splitlines(keepends=True)
     out, inserted = [], False
     for line in lines:
         out.append(line)
-        if not inserted and line.startswith("include:"):
+        if not inserted and re.match(r"^include:\s*$", line):
             out.append(item)
             inserted = True
     text = "".join(out)
@@ -276,14 +314,12 @@ def ensure_networks(src: str) -> str:
         "    external: true\n"
     )
     if re.search(r"(?m)^networks:\s*$", src):
-        # insert missing keys under existing networks:
         m = re.search(r"(?m)^networks:\s*\n", src)
         assert m
         insert_at = m.end()
         chunk = ""
         if not re.search(r"(?m)^  auth:\s*$", src):
             chunk += auth_block
-        # tak may already exist without external — only add if missing entirely
         if not re.search(rf"(?m)^  {re.escape(tak_net)}:\s*$", src):
             chunk += tak_block
         if chunk:
@@ -292,7 +328,6 @@ def ensure_networks(src: str) -> str:
         else:
             print("Compose:     networks auth/tak already present")
         return src
-    # no networks key — append
     if not src.endswith("\n"):
         src += "\n"
     src += "\nnetworks:\n" + auth_block + tak_block
@@ -303,24 +338,20 @@ text = ensure_networks(text)
 
 # --- attach SWAG (or named service) to auth + tak ---
 svc = swag_svc
-# find "  swag:" service block
 pat = re.compile(rf"(?m)^  {re.escape(svc)}:\s*$")
 m = pat.search(text)
 if not m:
     print(f"Compose:     no service '{svc}' — add networks: [auth, {tak_net}] manually")
 else:
-    # next service or top-level key ends the block
     rest = text[m.end():]
     end_rel = len(rest)
     for nm in re.finditer(r"(?m)^  [A-Za-z0-9_-]+:\s*$", rest):
         end_rel = nm.start()
         break
-    # also stop before top-level networks/volumes/include if somehow nested — services are under services:
     block = rest[:end_rel]
     if re.search(rf"(?m)^\s+-\s*{re.escape(tak_net)}\s*$", block) and re.search(r"(?m)^\s+-\s*auth\s*$", block):
         print(f"Compose:     {svc} already on auth + {tak_net}")
     elif re.search(r"(?m)^    networks:\s*$", block):
-        # add missing list items after networks:
         def add_net(b, name):
             if re.search(rf"(?m)^\s+-\s*{re.escape(name)}\s*$", b):
                 return b
@@ -334,7 +365,6 @@ else:
         text = text[: m.end()] + new_block + rest[end_rel:]
         print(f"Compose:     {svc} networks += auth, {tak_net}")
     elif re.search(r"(?m)^    networks:\s*\[", block):
-        # inline list form
         def add_inline(b, name):
             m2 = re.search(r"(?m)^    networks:\s*\[([^\]]*)\]", b)
             if not m2:
@@ -348,7 +378,6 @@ else:
         text = text[: m.end()] + new_block + rest[end_rel:]
         print(f"Compose:     {svc} networks list += auth, {tak_net}")
     else:
-        # insert networks key at start of service body
         new_block = (
             "\n"
             "    networks:\n"
@@ -360,7 +389,10 @@ else:
         print(f"Compose:     {svc} added networks auth, {tak_net}")
 
 open(compose_file, "w").write(text)
-print(f"Compose:     wrote {compose_file}")
+if text == before:
+    print(f"Compose:     no content change ({compose_file})")
+else:
+    print(f"Compose:     wrote {compose_file}")
 PY
 fi
 
@@ -375,11 +407,15 @@ EOF
 umask 022
 
 echo
+echo "Directory:   $root"
 echo "Domain:      $domain"
 echo "Auth host:   auth.$domain"
 echo "Containers:  auth_lldap auth_authelia [auth_authelia_admin]"
 echo "Admin UI:    ADMIN_EXPOSE=$admin_expose"
-echo "Env files:   config/common.env config/lldap.env config/authelia.env config/.authelia-admin.env"
+echo "Env files:   config/common.env config/lldap.env config/authelia.env config/authelia-admin.env"
+if [[ -n $compose_file ]]; then
+  echo "Compose:     $compose_file  (include auth-home/compose.yaml)"
+fi
 if [[ $no_swag -eq 1 ]]; then
   echo "Ports:       compose.no-swag.yaml (host publish)"
   echo
