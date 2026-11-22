@@ -72,8 +72,10 @@ services:
       - ./data/authelia:/data
 
 networks:
+  # Both pre-created (setup.sh / operator). Shared root project must not "own" them.
   auth:
     name: auth
+    external: true
   tak:
     name: ${AUTH_NETWORK:-tak}
     external: true

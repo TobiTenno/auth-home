@@ -311,17 +311,29 @@ else:
     text = f"include:\n{item}\n{text}"
     print(f"Compose:     prepended include {rel}")
 
-# --- top-level networks: auth + tak ---
+# --- top-level networks: auth + tak (both external — shared across projects) ---
 def ensure_networks(src: str) -> str:
     auth_block = (
         "  auth:\n"
         "    name: auth\n"
+        "    external: true\n"
     )
     tak_block = (
         f"  {tak_net}:\n"
         f"    name: {tak_net}\n"
         "    external: true\n"
     )
+    # Upgrade existing auth: missing external: true (causes WARN under shared root project)
+    if re.search(r"(?m)^  auth:\s*$", src) and not re.search(
+        r"(?m)^  auth:\s*\n(?:    .*\n)*?    external:\s*true\s*$", src
+    ):
+        src = re.sub(
+            r"(?m)^(  auth:\s*\n(?:    name:\s*auth\s*\n)?)",
+            r"\1    external: true\n",
+            src,
+            count=1,
+        )
+        print("Compose:     auth network → external: true")
     if re.search(r"(?m)^networks:\s*$", src):
         m = re.search(r"(?m)^networks:\s*\n", src)
         assert m
@@ -404,6 +416,17 @@ else:
     print(f"Compose:     wrote {compose_file}")
 PY
 fi
+
+# Pre-create shared networks (compose marks them external)
+for net in auth "${AUTH_NETWORK:-tak}"; do
+  if docker network inspect "$net" >/dev/null 2>&1; then
+    echo "Network:    $net (exists)"
+  elif docker network create "$net" >/dev/null 2>&1; then
+    echo "Network:    created $net"
+  else
+    echo "Network:    could not create $net — create manually before compose up" >&2
+  fi
+done
 
 umask 077
 cat > config/secrets/cloudtak-oidc.txt <<EOF

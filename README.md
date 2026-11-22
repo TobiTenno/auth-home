@@ -31,7 +31,7 @@ docker compose --profile auth --profile admin up -d
 1. Copies **runtime** files next to the compose file as `auth-home/` (compose, scripts, setup — not `templates/` or `*.template`)  
 2. Renders env / Authelia YAML / SWAG conf from the authoring tree into that deploy dir  
 3. `include:`s `auth-home/compose.yaml` in the root compose  
-4. Ensures top-level `networks.auth` + `networks.tak` (external)  
+4. Ensures top-level `networks.auth` + `networks.tak` both `external: true`, and `docker network create` if missing  
 5. Attaches the `swag` service (override with `--swag-service`) to **both** networks  
 
 Always run setup from the git/authoring clone with `-f`; do not expect templates inside the deploy copy.
