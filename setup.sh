@@ -67,7 +67,8 @@ fi
 
 if [[ $root != "$src" ]]; then
   # Runtime only — templates stay in the authoring/git tree ($src)
-  mkdir -p "$root/config/authelia" "$root/config/secrets" "$root/swag" "$root/scripts"
+  mkdir -p "$root/config/authelia" "$root/config/secrets" "$root/swag" "$root/scripts" \
+    "$root/data/lldap" "$root/data/authelia"
   cp "$src/compose.yaml" "$src/compose.no-swag.yaml" "$src/setup.sh" "$src/README.md" "$root/"
   cp "$src/scripts/migrate-users.sh" "$root/scripts/"
   chmod +x "$root/setup.sh" "$root/scripts/migrate-users.sh"
@@ -91,7 +92,7 @@ domain_dc=$(python3 -c "print(','.join('dc='+p for p in '${domain}'.split('.')))
 rand() { openssl rand -hex "${1:-16}"; }
 rand_pass() { echo "Auth!$(openssl rand -hex 8)"; }
 
-mkdir -p config/authelia config/secrets swag
+mkdir -p config/authelia config/secrets swag data/lldap data/authelia
 
 # Preserve secrets across re-runs
 load_env() {
@@ -427,15 +428,22 @@ fi
 if [[ $no_swag -eq 1 ]]; then
   echo "Ports:       compose.no-swag.yaml (host publish)"
   echo
-  echo "Up:"
+  echo "Up by name (preferred on a shared root compose):"
+  echo "  docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia"
+  echo "  docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia auth_authelia_admin"
+  echo "Up by profile (also starts unprofiled services in a shared root compose):"
   echo "  docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d"
+  echo "  docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth --profile admin up -d"
 else
   echo "Ports:       none (SWAG proxies on network auth)"
   echo
-  echo "Up:"
+  echo "Up by name (preferred on a shared root compose):"
+  echo "  docker compose up -d auth_lldap auth_authelia"
+  echo "  docker compose up -d auth_lldap auth_authelia auth_authelia_admin"
+  echo "Up by profile (also starts unprofiled services in a shared root compose):"
   echo "  docker compose --profile auth up -d"
+  echo "  docker compose --profile auth --profile admin up -d"
 fi
-echo "  docker compose --profile auth --profile admin up -d   # + admin UI"
 echo "  ./scripts/migrate-users.sh --tak-home /path/to/tak-home [--migrate-plaintext-pass]"
 if [[ $no_swag -eq 0 ]]; then
   echo "  Copy swag/auth.conf → SWAG site-confs; nginx -t && reload"

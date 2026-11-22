@@ -7,6 +7,7 @@ config/auth.env
 config/authelia/configuration.yml
 config/authelia/oidc.pem
 config/secrets/
+data/
 swag/auth.conf
 .compose-file
 .no-swag

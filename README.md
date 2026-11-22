@@ -10,8 +10,14 @@ Containers use the `auth_` prefix (like `tak_*`). Not part of `tak-home`.
 # optional: lock admin UIs
 ./setup.sh example.com -f ../docker-compose.yml --admin-expose tailscale
 
+# Preferred on a shared root compose: name services (does not start unprofiled siblings)
+docker compose up -d auth_lldap auth_authelia
+docker compose up -d auth_lldap auth_authelia auth_authelia_admin
+
+# Profile form (fine in a standalone auth-home project; on a shared root compose
+# --profile auth also starts every service that has no profile)
 docker compose --profile auth up -d
-docker compose --profile auth --profile admin up -d   # + auth_authelia_admin
+docker compose --profile auth --profile admin up -d
 
 ./scripts/migrate-users.sh --tak-home ../tak-home --email-domain example.com --dry-run
 ./scripts/migrate-users.sh --tak-home ../tak-home --email-domain example.com --migrate-plaintext-pass
@@ -31,6 +37,7 @@ Always run setup from the git/authoring clone with `-f`; do not expect templates
 
 ```sh
 ./setup.sh example.com --no-swag
+docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia
 docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
 ```
 
@@ -47,6 +54,15 @@ Default host ports: `17170`/`3890` (LLDAP), `9091` (Authelia), `8080` (admin). O
 | `config/authelia.secrets.env` | setup re-runs only (YAML secrets) |
 
 Compose uses `env_file:` lists (not a single shared `auth.env`).
+
+## Data (bind mounts)
+
+| Host path | Container |
+| --- | --- |
+| `data/lldap/` | `auth_lldap` → `/data` |
+| `data/authelia/` | `auth_authelia` → `/data` (SQLite + notifier) |
+
+These are local directories under the deploy tree (gitignored), not Docker named volumes — so they stay on the same disk as `auth-home/`.
 
 ## Admin exposure
 

@@ -4,11 +4,16 @@ name: auth-home
 # Joins Docker networks "auth" (own) and "tak" (shared with SWAG / tak-home).
 #
 #   ./setup.sh example.com -f ../docker-compose.yml
+# By name (preferred on shared root compose):
+#   docker compose up -d auth_lldap auth_authelia
+#   docker compose up -d auth_lldap auth_authelia auth_authelia_admin
+# By profile (also starts unprofiled root services when included there):
 #   docker compose --profile auth up -d
-#   docker compose --profile auth --profile admin up -d   # + auth_authelia_admin
+#   docker compose --profile auth --profile admin up -d
 #
 # No host ports by default (SWAG proxies). For direct publish:
 #   ./setup.sh example.com --no-swag
+#   docker compose -f compose.yaml -f compose.no-swag.yaml up -d auth_lldap auth_authelia
 #   docker compose -f compose.yaml -f compose.no-swag.yaml --profile auth up -d
 
 x-auth: &auth
@@ -25,7 +30,8 @@ services:
       - ./config/common.env
       - ./config/lldap.env
     volumes:
-      - lldap_data:/data
+      # Bind mounts — data stays under auth-home/ on the host disk (not Docker named volumes)
+      - ./data/lldap:/data
 
   auth_authelia:
     <<: *auth
@@ -38,12 +44,12 @@ services:
     volumes:
       # File mounts (not the whole dir): entrypoint chown fails on :ro directory binds
       - ./config/authelia/configuration.yml:/config/configuration.yml:ro
-      - authelia_data:/data
+      - ./data/authelia:/data
 
-  # Optional UI: docker compose --profile auth --profile admin up -d
+  # Optional UI: docker compose up -d auth_lldap auth_authelia auth_authelia_admin
   auth_authelia_admin:
     <<: *auth
-    # Override anchor: only with --profile admin (also pass --profile auth for deps)
+    # Override anchor: admin profile only (naming the service enables it)
     profiles: [admin]
     image: ghcr.io/asalimonov/authelia-admin:latest
     container_name: auth_authelia_admin
@@ -51,10 +57,6 @@ services:
     env_file:
       - ./config/common.env
       - ./config/authelia-admin.env
-
-volumes:
-  lldap_data:
-  authelia_data:
 
 networks:
   auth:
