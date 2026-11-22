@@ -82,9 +82,12 @@ source config/lldap.env
 set +a
 
 ADMIN_USER=admin
-ADMIN_PASS=${LLDAP_LDAP_USER_PASS:?}
+# Trim CR/LF from env files (CRLF → opaque/LDAP weirdness)
+ADMIN_PASS=$(printf '%s' "${LLDAP_LDAP_USER_PASS:?}" | tr -d '\r\n')
 BASE_DN=${LLDAP_BASE_DN:-${LLDAP_LDAP_BASE_DN:?}}
+BASE_DN=$(printf '%s' "$BASE_DN" | tr -d '\r\n')
 auth_net=${AUTH_NETWORK_AUTH:-auth}
+LLDAP_AUTHELIA_PASSWORD=$(printf '%s' "${LLDAP_AUTHELIA_PASSWORD:-}" | tr -d '\r\n')
 
 lldap_running() {
   docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$lldap_ctr"
@@ -216,32 +219,85 @@ except Exception:
   graphql "$q" >/dev/null 2>&1 || true
 }
 
+set_password_opaque() {
+  local user=$1 pass=$2
+  local out err=0
+  # Prefer JWT we already have; pass via env to avoid shell/`!` quirks
+  local args=(exec -e "LLDAP_USER_PASSWORD=$pass" "$lldap_ctr" /app/lldap_set_password
+    --base-url http://127.0.0.1:17170 --username "$user")
+  if [[ -n ${TOKEN:-} ]]; then
+    args+=(--token "$TOKEN")
+  else
+    args+=(--admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS")
+  fi
+  set +e
+  out=$(docker "${args[@]}" 2>&1)
+  err=$?
+  set -e
+  if [[ $err -eq 0 ]]; then
+    echo "pass:      $user ok (opaque)"
+    return 0
+  fi
+  echo "pass:      $user opaque failed: $out" >&2
+  return 1
+}
+
+# Fallback when opaque register/start returns 400 (seen on some LLDAP states)
+set_password_ldap() {
+  local user=$1 pass=$2
+  local dn="uid=${user},ou=people,${BASE_DN}"
+  local admin_dn="uid=${ADMIN_USER},ou=people,${BASE_DN}"
+  local out err=0
+  if ! docker network inspect "$auth_net" >/dev/null 2>&1; then
+    echo "pass:      $user ldap fallback needs docker network $auth_net" >&2
+    return 1
+  fi
+  set +e
+  out=$(docker run --rm --network "$auth_net" \
+    -e "LDAP_ADMIN_DN=$admin_dn" -e "LDAP_ADMIN_PW=$ADMIN_PASS" \
+    -e "LDAP_USER_DN=$dn" -e "LDAP_USER_PW=$pass" -e "LDAP_HOST=$lldap_ctr" \
+    alpine:3.19 sh -c '
+      apk add --no-cache openldap-clients >/dev/null
+      ldappasswd -x -H "ldap://${LDAP_HOST}:3890" \
+        -D "$LDAP_ADMIN_DN" -w "$LDAP_ADMIN_PW" \
+        -s "$LDAP_USER_PW" "$LDAP_USER_DN"
+    ' 2>&1)
+  err=$?
+  set -e
+  if [[ $err -eq 0 ]]; then
+    echo "pass:      $user ok (ldap)"
+    return 0
+  fi
+  echo "pass:      $user ldap failed: $out" >&2
+  return 1
+}
+
 set_password() {
   local user=$1 pass=$2
-  local err=0 out=""
+  pass=$(printf '%s' "$pass" | tr -d '\r\n')
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY pass:  $user"
     return 0
   fi
-  if ! lldap_running; then
-    echo "pass:      $lldap_ctr not running — need docker exec for lldap_set_password" >&2
-    echo "$user	$pass" >> "$root/config/secrets/pending-passwords.tsv"
-    return 1
-  fi
-  # 127.0.0.1 here is inside auth_lldap (not the host)
-  set +e
-  out=$(docker exec "$lldap_ctr" /app/lldap_set_password --base-url http://127.0.0.1:17170 \
-    --admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS" \
-    --username "$user" --password "$pass" 2>&1)
-  err=$?
-  set -e
-  if [[ $err -eq 0 ]]; then
-    echo "pass:      $user ok"
+  if lldap_running && set_password_opaque "$user" "$pass"; then
     return 0
   fi
-  echo "pass:      $user FAILED: $out" >&2
+  if set_password_ldap "$user" "$pass"; then
+    return 0
+  fi
   echo "$user	$pass" >> "$root/config/secrets/pending-passwords.tsv"
   return 1
+}
+
+delete_user() {
+  local user=$1
+  local q
+  q=$(printf '{"query":"mutation { deleteUser(userId: %s) { ok } }"}' "$(json_escape "$user")")
+  if [[ $dry_run -eq 1 ]]; then
+    echo "DRY delete: $user"
+    return 0
+  fi
+  graphql "$q" >/dev/null 2>&1 || true
 }
 
 # Confirm Authelia can authenticate as the bind user (simple login)
@@ -361,6 +417,8 @@ fi
 # Ensure Authelia bind user exists (required before auth_authelia can start)
 bind_ok=1
 if [[ $dry_run -eq 0 ]]; then
+  # Fresh bind user avoids stuck OPAQUE state → register/start 400
+  delete_user "authelia"
   create_user "authelia" "authelia@${DOMAIN:-localhost}"
   if ! set_password "authelia" "$LLDAP_AUTHELIA_PASSWORD"; then
     bind_ok=0
