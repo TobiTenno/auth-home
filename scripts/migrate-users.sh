@@ -25,7 +25,10 @@ dry_run=0
 no_passwords=0
 ensure_groups=1
 bind_only=0
-lldap_url="${LLDAP_URL:-http://127.0.0.1:17170}"
+# Only used when --lldap-url is set (e.g. --no-swag host ports). Default = docker network.
+lldap_url="${LLDAP_URL:-}"
+lldap_ctr=auth_lldap
+auth_net=auth
 
 usage() {
   cat <<'EOF'
@@ -40,7 +43,8 @@ Usage: ./scripts/migrate-users.sh --bind-only
   --migrate-plaintext-pass     Use USER_PASS_* / TSV password column as initial LLDAP passwords
   --no-passwords               Create users without setting a password
   --dry-run                    Print actions only
-  --lldap-url URL              Default http://127.0.0.1:17170 (or docker exec path)
+  --lldap-url URL              Host URL only if LLDAP ports published (--no-swag).
+                               Default: talk via docker exec / network auth (no host ports)
   --skip-groups                Do not ensure default groups
 
 Requires config/*.env (from ./setup.sh). Talks to LLDAP GraphQL as admin.
@@ -80,36 +84,81 @@ set +a
 ADMIN_USER=admin
 ADMIN_PASS=${LLDAP_LDAP_USER_PASS:?}
 BASE_DN=${LLDAP_BASE_DN:-${LLDAP_LDAP_BASE_DN:?}}
+auth_net=${AUTH_NETWORK_AUTH:-auth}
 
-# Prefer docker exec into lldap when URL is loopback and container is up
+lldap_running() {
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$lldap_ctr"
+}
+
+# HTTP to LLDAP without host ports:
+#   1) docker exec into auth_lldap (127.0.0.1 *inside* that container)
+#   2) else one-shot curl on Docker network "auth" → http://auth_lldap:17170
+#   3) else --lldap-url / LLDAP_URL (only when ports published)
+lldap_http() {
+  # usage: lldap_http METHOD PATH [json-body] [bearer-token]
+  local method=$1 path=$2 body=${3:-} token=${4:-}
+  local url headers=(-H "Content-Type: application/json")
+  [[ -n $token ]] && headers+=(-H "Authorization: Bearer $token")
+
+  if lldap_running; then
+    # busybox wget inside image; 127.0.0.1 is loopback *in* the container
+    local wd=(-qO-)
+    wd+=(--header="Content-Type: application/json")
+    [[ -n $token ]] && wd+=(--header="Authorization: Bearer $token")
+    if [[ $method == POST || -n $body ]]; then
+      wd+=(--post-data="$body")
+    fi
+    docker exec -i "$lldap_ctr" wget "${wd[@]}" "http://127.0.0.1:17170${path}"
+    return
+  fi
+
+  if docker network inspect "$auth_net" >/dev/null 2>&1; then
+    # One-shot on the auth network — no host publish required
+    if [[ -n $body ]]; then
+      docker run --rm --network "$auth_net" curlimages/curl:8.5.0 \
+        -fsS -X "$method" "${headers[@]}" -d "$body" "http://${lldap_ctr}:17170${path}"
+    else
+      docker run --rm --network "$auth_net" curlimages/curl:8.5.0 \
+        -fsS -X "$method" "${headers[@]}" "http://${lldap_ctr}:17170${path}"
+    fi
+    return
+  fi
+
+  if [[ -n $lldap_url ]]; then
+    if [[ -n $body ]]; then
+      curl -fsS -X "$method" "${headers[@]}" -d "$body" "${lldap_url}${path}"
+    else
+      curl -fsS -X "$method" "${headers[@]}" "${lldap_url}${path}"
+    fi
+    return
+  fi
+
+  echo "LLDAP unreachable: start $lldap_ctr (no host ports) or pass --lldap-url for --no-swag" >&2
+  return 1
+}
+
 graphql() {
   local body=$1
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx auth_lldap; then
-    docker exec -i auth_lldap wget -qO- \
-      --header="Content-Type: application/json" \
-      --header="Authorization: Bearer $TOKEN" \
-      --post-data="$body" \
-      http://127.0.0.1:17170/api/graphql
-  else
-    curl -fsS -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-      -d "$body" "$lldap_url/api/graphql"
-  fi
+  lldap_http POST /api/graphql "$body" "$TOKEN"
 }
 
 login() {
-  local resp
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx auth_lldap; then
-    resp=$(docker exec -i auth_lldap wget -qO- \
-      --header="Content-Type: application/json" \
-      --post-data="{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" \
-      http://127.0.0.1:17170/auth/simple/login)
-  else
-    resp=$(curl -fsS -H "Content-Type: application/json" \
-      -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" \
-      "$lldap_url/auth/simple/login")
-  fi
+  local resp body
+  body=$(U="$ADMIN_USER" P="$ADMIN_PASS" python3 -c \
+    'import json,os; print(json.dumps({"username":os.environ["U"],"password":os.environ["P"]}))')
+  resp=$(lldap_http POST /auth/simple/login "$body") || {
+    echo "LLDAP login request failed" >&2
+    exit 1
+  }
   TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' <<<"$resp")
-  [[ -n $TOKEN ]] || { echo "LLDAP login failed" >&2; exit 1; }
+  [[ -n $TOKEN ]] || { echo "LLDAP login failed: $resp" >&2; exit 1; }
+  if lldap_running; then
+    echo "LLDAP:      via docker exec $lldap_ctr"
+  elif [[ -n $lldap_url ]]; then
+    echo "LLDAP:      via $lldap_url"
+  else
+    echo "LLDAP:      via network $auth_net → $lldap_ctr"
+  fi
 }
 
 json_escape() {
@@ -174,14 +223,14 @@ set_password() {
     echo "DRY pass:  $user"
     return 0
   fi
-  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx auth_lldap; then
-    echo "pass:      auth_lldap not running — cannot set $user" >&2
+  if ! lldap_running; then
+    echo "pass:      $lldap_ctr not running — need docker exec for lldap_set_password" >&2
     echo "$user	$pass" >> "$root/config/secrets/pending-passwords.tsv"
     return 1
   fi
-  # Do not hide stderr — silent fail left Authelia with Invalid Credentials
+  # 127.0.0.1 here is inside auth_lldap (not the host)
   set +e
-  out=$(docker exec auth_lldap /app/lldap_set_password --base-url http://127.0.0.1:17170 \
+  out=$(docker exec "$lldap_ctr" /app/lldap_set_password --base-url http://127.0.0.1:17170 \
     --admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS" \
     --username "$user" --password "$pass" 2>&1)
   err=$?
@@ -195,17 +244,18 @@ set_password() {
   return 1
 }
 
-# Confirm Authelia can authenticate as the bind user (GraphQL simple login)
+# Confirm Authelia can authenticate as the bind user (simple login)
 verify_bind() {
-  local pass=$1 resp
+  local pass=$1 resp body
   if [[ $dry_run -eq 1 ]]; then
     echo "DRY verify: authelia bind"
     return 0
   fi
-  resp=$(docker exec -i auth_lldap wget -qO- \
-    --header="Content-Type: application/json" \
-    --post-data="{\"username\":\"authelia\",\"password\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$pass")}" \
-    http://127.0.0.1:17170/auth/simple/login 2>&1) || true
+  body=$(U=authelia P="$pass" python3 -c \
+    'import json,os; print(json.dumps({"username":os.environ["U"],"password":os.environ["P"]}))')
+  set +e
+  resp=$(lldap_http POST /auth/simple/login "$body" 2>&1)
+  set -e
   if python3 -c 'import json,sys; json.load(sys.stdin)["token"]' <<<"$resp" 2>/dev/null; then
     echo "verify:    authelia bind login ok"
     return 0
