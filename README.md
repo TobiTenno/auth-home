@@ -19,12 +19,13 @@ docker compose --profile auth --profile admin up -d   # + auth_authelia_admin
 
 `-f` programmatically (same idea as `tak-home`):
 
-1. Copies this stack next to the compose file as `auth-home/`  
-2. `include:`s `auth-home/compose.yaml` in that root compose  
-3. Ensures top-level `networks.auth` + `networks.tak` (external)  
-4. Attaches the `swag` service (override with `--swag-service`) to **both** networks  
+1. Copies **runtime** files next to the compose file as `auth-home/` (compose, scripts, setup — not `templates/` or `*.template`)  
+2. Renders env / Authelia YAML / SWAG conf from the authoring tree into that deploy dir  
+3. `include:`s `auth-home/compose.yaml` in the root compose  
+4. Ensures top-level `networks.auth` + `networks.tak` (external)  
+5. Attaches the `swag` service (override with `--swag-service`) to **both** networks  
 
-Run from the git/authoring copy; generated files land beside `-f`, not only in the clone.
+Always run setup from the git/authoring clone with `-f`; do not expect templates inside the deploy copy.
 
 ## No SWAG (host ports)
 

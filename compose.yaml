@@ -36,7 +36,8 @@ services:
       - ./config/common.env
       - ./config/authelia.env
     volumes:
-      - ./config/authelia:/config:ro
+      # File mounts (not the whole dir): entrypoint chown fails on :ro directory binds
+      - ./config/authelia/configuration.yml:/config/configuration.yml:ro
       - authelia_data:/data
 
   # Optional UI: docker compose --profile auth --profile admin up -d

@@ -66,17 +66,25 @@ else
 fi
 
 if [[ $root != "$src" ]]; then
-  mkdir -p "$root/config/authelia" "$root/config/secrets" "$root/swag" "$root/scripts" "$root/templates"
+  # Runtime only — templates stay in the authoring/git tree ($src)
+  mkdir -p "$root/config/authelia" "$root/config/secrets" "$root/swag" "$root/scripts"
   cp "$src/compose.yaml" "$src/compose.no-swag.yaml" "$src/setup.sh" "$src/README.md" "$root/"
   cp "$src/scripts/migrate-users.sh" "$root/scripts/"
-  cp "$src/templates/"*.template "$root/templates/"
-  cp "$src/config/"*.template "$root/config/"
-  cp "$src/swag/auth.conf.template" "$root/swag/"
   chmod +x "$root/setup.sh" "$root/scripts/migrate-users.sh"
-  echo "Deploy:     copied stack → $root"
+  # Drop leftover authoring bits from older deploys
+  rm -rf "$root/templates" "$root/docs"
+  rm -f "$root/config/"*.template "$root/swag/"*.template "$root/config/auth.env.template"
+  echo "Deploy:     runtime → $root (templates read from $src)"
 fi
 
 cd "$root"
+
+# Template sources: authoring tree when deploying with -f, else this tree
+tmpl_root=$src
+[[ -f $tmpl_root/templates/authelia.configuration.yml.template ]] || {
+  echo "Missing templates under $tmpl_root — run setup from the git/authoring clone" >&2
+  exit 1
+}
 
 domain_dc=$(python3 -c "print(','.join('dc='+p for p in '${domain}'.split('.')))")
 
@@ -113,7 +121,7 @@ OIDC_CLOUDTAK_CLIENT_SECRET=${OIDC_CLOUDTAK_CLIENT_SECRET:-$(rand 24)}
 AUTH_NETWORK=${AUTH_NETWORK:-tak}
 
 fill() {
-  local src=$1 dst=$2
+  local tmpl=$1 dst=$2
   umask 077
   sed \
     -e "s|@DOMAIN@|$domain|g" \
@@ -123,11 +131,11 @@ fill() {
     -e "s|@LLDAP_ADMIN_PASSWORD@|$LLDAP_ADMIN_PASSWORD|g" \
     -e "s|@LLDAP_JWT_SECRET@|$LLDAP_JWT_SECRET|g" \
     -e "s|@LLDAP_AUTHELIA_PASSWORD@|$LLDAP_AUTHELIA_PASSWORD|g" \
-    "$src" > "$dst"
+    "$tmpl" > "$dst"
   umask 022
 }
 
-fill config/common.env.template config/common.env
+fill "$tmpl_root/config/common.env.template" config/common.env
 # append secrets not in template
 {
   cat config/common.env
@@ -139,12 +147,12 @@ EOF
 } > config/common.env.tmp && mv config/common.env.tmp config/common.env
 chmod 600 config/common.env
 
-fill config/lldap.env.template config/lldap.env
+fill "$tmpl_root/config/lldap.env.template" config/lldap.env
 chmod 600 config/lldap.env
 
-fill config/authelia.env.template config/authelia.env
+fill "$tmpl_root/config/authelia.env.template" config/authelia.env
 
-fill config/authelia-admin.env.template config/authelia-admin.env
+fill "$tmpl_root/config/authelia-admin.env.template" config/authelia-admin.env
 chmod 600 config/authelia-admin.env
 
 # Keep LLDAP_AUTHELIA_PASSWORD available for Authelia YAML
@@ -183,7 +191,7 @@ export OIDC_HASH=$oidc_hash
 export JWKS_INDENTED
 JWKS_INDENTED=$(sed 's/^/          /' "$jwks")
 
-python3 - "$root/templates/authelia.configuration.yml.template" \
+python3 - "$tmpl_root/templates/authelia.configuration.yml.template" \
   "$root/config/authelia/configuration.yml" <<'PY'
 import pathlib, sys, os
 tmpl, out = sys.argv[1], sys.argv[2]
@@ -221,7 +229,7 @@ LLDAP_AUTHELIA_PASSWORD=$LLDAP_AUTHELIA_PASSWORD
 EOF
 umask 022
 
-python3 - "$admin_expose" "$domain" "$root/swag/auth.conf.template" "$root/swag/auth.conf" <<'PY'
+python3 - "$admin_expose" "$domain" "$tmpl_root/swag/auth.conf.template" "$root/swag/auth.conf" <<'PY'
 import pathlib, sys
 mode, domain, tmpl, out = sys.argv[1:5]
 auth_host = f"auth.{domain}"
